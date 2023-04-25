@@ -75,7 +75,6 @@ class OptimizationViaALBO:
         }
 
         d = self.bounds.shape[1]
-        bounds_normalized = torch.cat((torch.zeros(1, d), torch.ones(1, d)), dim=0)
         m = self.joint_function(self.train_x).shape[1]
 
         sampler = SobolQMCNormalSampler(sample_shape=self.mc_samples, seed=self.seed)
@@ -115,7 +114,7 @@ class OptimizationViaALBO:
                 qSR = qSimpleRegret(model=model, objective=albo_risk_objective, sampler=sampler)
                 candidate, acq_value_list = optimize_acqf(
                     acq_function=qSR,
-                    bounds=bounds_normalized,
+                    bounds=self.bounds,
                     q=1,
                     num_restarts=self.number_restarts,
                     raw_samples=self.raw_samples
@@ -129,7 +128,7 @@ class OptimizationViaALBO:
                                        best_f=best_f.item())
             candidate, acq_value_list = optimize_acqf(
                 acq_function=qEI,
-                bounds=bounds_normalized,
+                bounds=self.bounds,
                 q=1,
                 num_restarts=self.number_restarts,
                 raw_samples=self.raw_samples
