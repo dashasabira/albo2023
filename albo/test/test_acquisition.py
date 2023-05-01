@@ -1,4 +1,4 @@
-from albo.acquisition import MyAcquisition
+from albo.acquisition import OptimizationViaALBO
 
 
 def test_my_acquisition():

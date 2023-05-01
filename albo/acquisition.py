@@ -11,7 +11,7 @@ from botorch.models.transforms.outcome import Standardize
 
 from gpytorch.mlls import ExactMarginalLogLikelihood
 
-from botorch.sampling import SobolQMCNormalSampler
+from botorch.sampling import SobolQMCNormalSampler, IIDNormalSampler
 from botorch.utils import get_objective_weights_transform
 
 from typing import Optional
@@ -25,6 +25,7 @@ class OptimizationViaALBO:
                  joint_function,
                  bounds: Tensor,
                  penalty_rate: float = 1.,
+                 eta: Optional[float] = None,
                  mc_samples: int = 1024,
                  raw_samples: int = 100,
                  number_restarts: int = 6,
@@ -39,6 +40,7 @@ class OptimizationViaALBO:
         self.joint_function = joint_function
         self.bounds = bounds
         self.penalty_rate = penalty_rate
+        self.eta = eta
         self.mc_samples = torch.Size([mc_samples])
         self.raw_samples = raw_samples
         self.number_restarts = number_restarts
@@ -68,16 +70,14 @@ class OptimizationViaALBO:
         print('---')
 
     def optimize(self):
-        trace = {
-            'x': [],
-            'lagrange_mults_inner': [],
-            'lagrange_mults_outer': []
-        }
+        trace = {'seed_points': self.train_x, 'x': [], 'x_inner': [], 'lagrange_mults_inner': [],
+                 'lagrange_mults_outer': []}
 
         d = self.bounds.shape[1]
         m = self.joint_function(self.train_x).shape[1]
 
-        sampler = SobolQMCNormalSampler(sample_shape=self.mc_samples, seed=self.seed)
+        # sampler = SobolQMCNormalSampler(sample_shape=self.mc_samples, seed=self.seed)
+        sampler = IIDNormalSampler(sample_shape=self.mc_samples, seed=self.seed)
 
         zeros = torch.zeros(m, dtype=torch.double)
         zeros[0] = 1
@@ -93,12 +93,14 @@ class OptimizationViaALBO:
 
         for i in range(self.number_of_outer_loops):
             trace_inner_lagranges = []
+            trace_inner_x = []
             values_functions = self.joint_function(self.train_x)
 
             albo_risk_objective = AlboMCObjective(
                 objective=objective_callable,
                 constraints=constraint_callable_list,
-                penalty_rate=self.penalty_rate)
+                penalty_rate=self.penalty_rate,
+                eta=self.eta)
 
             model = FixedNoiseGP(train_X=self.train_x,
                                  train_Y=values_functions,
@@ -118,9 +120,11 @@ class OptimizationViaALBO:
                     q=1,
                     num_restarts=self.number_restarts,
                     raw_samples=self.raw_samples
+                    # options={'maxiter': 5}
                 )
-                albo_risk_objective.update_mults(sampler(model.posterior(candidate)))
                 trace_inner_lagranges.append(albo_risk_objective.lagrange_mults.clone().tolist())
+                trace_inner_x.append(candidate)
+                albo_risk_objective.update_mults(sampler(model.posterior(candidate)))
 
             lagrangian_values = torch.mean(albo_risk_objective.forward(sampler(model.posterior(self.train_x))), dim=0)
             best_f = max(lagrangian_values)
@@ -135,7 +139,9 @@ class OptimizationViaALBO:
             )
 
             self.train_x = torch.cat((self.train_x, candidate), 0)
+
             trace['x'].append(candidate)
+            trace['x_inner'].append(trace_inner_x)
             trace['lagrange_mults_outer'].append(albo_risk_objective.lagrange_mults.clone().tolist())
             trace['lagrange_mults_inner'].append(trace_inner_lagranges)
             if self.print_trace:
