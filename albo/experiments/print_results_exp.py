@@ -14,17 +14,8 @@ from botorch.sampling import SobolQMCNormalSampler, IIDNormalSampler
 from botorch.utils import get_objective_weights_transform
 from tqdm import tqdm
 from gpytorch.mlls import ExactMarginalLogLikelihood
-
-
-def gramacy(x):
-    """Gramacy problem function
-    """
-    x1 = x[:, 0]
-    x2 = x[:, 1]
-    f = -(x1 + x2)
-    c1 = (3. / 2) - x1 - 2. * x2 - (1. / 2) * np.sin(2. * np.pi * (x1 ** 2 - 2. * x2))
-    c2 = x1 ** 2 + x2 ** 2 - 3. / 2
-    return np.stack([f, c1, c2], axis=1)
+from albo.objective_albo import ClassicAlboMCObjective, ExpAlboMCObjective
+import json
 
 
 def make_feasibility_plot_2d(
@@ -47,7 +38,7 @@ def make_feasibility_plot_2d(
     y_ = y_grid.flatten()
 
     X = np.stack((x_, y_), axis=1)
-    Z = fcn(X)
+    Z = fcn(torch.tensor(X))
 
     contours = list()
     for i in range(Z.shape[1]):
@@ -66,10 +57,10 @@ def make_feasibility_plot_2d(
     return contours
 
 
-def plot_firstly(train_x):
+def plot_firstly(train_x, fcn):
     fh = plt.figure(figsize=[6, 6])
     axes = fh.subplots()
-    contours = make_feasibility_plot_2d(axes, gramacy,
+    contours = make_feasibility_plot_2d(axes, fcn,
                                         bounds=torch.tensor([[0.0, 0.0], [1.0, 1.0]], dtype=torch.double))
     local_optimizers = {'x': [0.1954, 0.7197, 0.0], 'y': [0.4044, 0.1411, 0.75]}
     train_x1 = train_x[:, 0]
@@ -77,7 +68,8 @@ def plot_firstly(train_x):
     f_opt = 0.599788
     axes.scatter(local_optimizers['x'], local_optimizers['y'], marker='*', zorder=10, color='k', s=50)
     axes.scatter(local_optimizers['x'][:1], local_optimizers['y'][:1], marker='*', zorder=10, color='r', s=100)
-    axes.scatter(train_x1, train_x2, marker='*', zorder=10, color='b', s=50)
+    axes.scatter(train_x1[:5], train_x2[:5], marker='*', zorder=10, color='m', s=50)
+    axes.scatter(train_x1[5:], train_x2[5:], marker='*', zorder=10, color='b', s=50)
     axes.set_xlim([0, 1])
     axes.set_ylim([0, 1])
     axes.set_title('Gramacy toy problem')
@@ -105,7 +97,7 @@ def return_model(train_x):
 
     model = FixedNoiseGP(train_X=train_x,
                          train_Y=train_y,
-                         train_Yvar=torch.full_like(train_y, 1e-6),
+                         train_Yvar=torch.full_like(train_y, 1e-4),
                          outcome_transform=Standardize(m=m),
                          input_transform=Normalize(d=d, bounds=bounds))
     mll = ExactMarginalLogLikelihood(likelihood=model.likelihood, model=model)
@@ -131,14 +123,14 @@ def callable_functions(m):
     return objective_callable, constraint_callable_list
 
 
-def dual_values(train_x, bounds_x, bounds_lmbds, n):
+def dual_values(train_x, bounds_x, bounds_lmbds, n, name_objective, penalty_rate):
     # n - количество точек в разбиении лямбд и иксов
     train_y = joint_function(train_x)
     m = train_y.shape[1]
 
     model = return_model(train_x)
 
-    sampler = IIDNormalSampler(sample_shape=1024, seed=100)
+    sampler = SobolQMCNormalSampler(sample_shape=1024, seed=100)
     objective_callable, constraint_callable_list = callable_functions(m)
 
     x, x_1_grid, x_2_grid = do_meshgrid(bounds_x, n)
@@ -146,11 +138,18 @@ def dual_values(train_x, bounds_x, bounds_lmbds, n):
 
     for i in tqdm(range(len(lmbds))):
         lmbd = lmbds[i].unsqueeze(1)
-        albo_risk_objective = AlboMCObjective(
-            objective=objective_callable,
-            constraints=constraint_callable_list,
-            penalty_rate=1,
-            lagrange_mults=lmbd)
+        if name_objective == "classic":
+            albo_risk_objective = ClassicAlboMCObjective(
+                objective=objective_callable,
+                constraints=constraint_callable_list,
+                penalty_rate=penalty_rate,
+                lagrange_mults=lmbd)
+        if name_objective == "exp":
+            albo_risk_objective = ExpAlboMCObjective(
+                objective=objective_callable,
+                constraints=constraint_callable_list,
+                penalty_rate=penalty_rate,
+                lagrange_mults=lmbd)
         z = torch.mean(albo_risk_objective.forward(sampler(model.posterior(x))), dim=0).unsqueeze(1)
         if i == 0:
             ans = z
@@ -161,29 +160,37 @@ def dual_values(train_x, bounds_x, bounds_lmbds, n):
     return ans_grid, (x, x_1_grid, x_2_grid), (lmbds, lmbd_1_grid, lmbd_2_grid)
 
 
-def print_dual_values(train_x, bounds_x, bounds_lmbds, n, lambdas_trace):
+def print_dual_values(train_x, bounds_x, bounds_lmbds, n, name_objective, penalty_rate, lambdas_trace=None):
     fh = plt.figure(figsize=[6, 6])
     axes = fh.subplots()
-
-    ans_grid, (x, x_1_grid, x_2_grid), (lmbds, lmbd_1_grid, lmbd_2_grid) = dual_values(train_x, bounds_x, bounds_lmbds, n)
+    ans_grid, (x, x_1_grid, x_2_grid), (lmbds, lmbd_1_grid, lmbd_2_grid) = dual_values(train_x, bounds_x, bounds_lmbds,
+                                                                                       n, name_objective, penalty_rate)
     clines = axes.contour(lmbd_1_grid, lmbd_2_grid, ans_grid, levels=None)
     axes.clabel(clines, fmt='%2.1f', colors='k')
-    axes.plot(lambdas_trace[:, 0, 0], lambdas_trace[:, 1, 0])
+    if lambdas_trace is not None:
+        axes.plot(lambdas_trace[:, 0, 0], lambdas_trace[:, 1, 0])
     plt.show()
 
 
-def albo_objective_values_for_lambda(train_x, bounds, lmbds, n, x_candidate):
+def albo_objective_values_for_lambda(train_x, bounds, lmbds, n, x_candidate, name_objective, penalty_rate):
     train_y = joint_function(train_x)
     m = train_y.shape[1]
     x, x_1_grid, x_2_grid = do_meshgrid(bounds, n)
     model = return_model(train_x)
     objective_callable, constraint_callable_list = callable_functions(m)
-    albo_objective = AlboMCObjective(
+    if name_objective == "classic":
+        albo_objective = ClassicAlboMCObjective(
             objective=objective_callable,
             constraints=constraint_callable_list,
-            penalty_rate=1,
+            penalty_rate=penalty_rate,
             lagrange_mults=lmbds)
-    sampler = IIDNormalSampler(sample_shape=1024, seed=100)
+    if name_objective == "exp":
+        albo_objective = ExpAlboMCObjective(
+            objective=objective_callable,
+            constraints=constraint_callable_list,
+            penalty_rate=penalty_rate,
+            lagrange_mults=lmbds)
+    sampler = SobolQMCNormalSampler(sample_shape=1024, seed=100)
     pst = model.posterior(x)
     smpl = sampler(pst)
     z = torch.mean(albo_objective.forward(smpl), dim=0)
@@ -192,7 +199,8 @@ def albo_objective_values_for_lambda(train_x, bounds, lmbds, n, x_candidate):
     return z, (x, x_1_grid, x_2_grid), value_at_candidate
 
 
-def print_albo_objective_values_for_lambda(train_x, bounds, lmbds, n, x_candidate, show=True, save=False, path=None):
+def print_albo_objective_values_for_lambda(train_x, bounds, lmbds, n, x_candidate, name_objective, penalty_rate,
+                                           show=True, save=False, path=None):
     # train_x - обучающая выборка для модели
     # bounds - в каких пределах рисуем иксы
     # lmbds - для каких фиксированных лямбда строим рисунки
@@ -200,7 +208,9 @@ def print_albo_objective_values_for_lambda(train_x, bounds, lmbds, n, x_candidat
 
     fh = plt.figure(figsize=[6, 6])
     axes = fh.subplots()
-    values, (x, x_1_grid, x_2_grid), value_at_candidate = albo_objective_values_for_lambda(train_x, bounds, lmbds, n, x_candidate)
+    values, (x, x_1_grid, x_2_grid), value_at_candidate = albo_objective_values_for_lambda(train_x, bounds, lmbds, n,
+                                                                                           x_candidate, name_objective,
+                                                                                           penalty_rate)
     clines = axes.contour(x_1_grid, x_2_grid, values.detach().numpy(), levels=None)
     axes.clabel(clines, fmt='%2.3f', colors='k')
     axes.scatter([x_candidate[0][0]], [x_candidate[0][1]], marker='*', zorder=10, color='r', s=10)
@@ -217,30 +227,83 @@ def print_albo_objective_values_for_lambda(train_x, bounds, lmbds, n, x_candidat
         plt.show()
 
 
+def learning_curve(axes, name):
+    with open(name, "r") as file:
+        data = json.load(file)
+
+    number_different_seed_points = len(data)
+    number_outer_loops = len(data[0]['x'])
+    number_seed_points = len(data[0]['seed_points'])
+    number_outer_loops_with_seeds = number_seed_points + number_outer_loops
+
+    best_arrays = []
+    for j in range(number_different_seed_points):
+        functions_values = np.concatenate(
+            (joint_function(torch.tensor(data[j]['seed_points'])),
+             joint_function(torch.tensor(data[j]['x'])[:, 0, :]))
+        )
+        best = np.inf
+        best_array = []
+        for i in range(number_outer_loops_with_seeds):
+            if functions_values[i][1] <= 0 and functions_values[i][2] <= 0:
+                best = min(best, -functions_values[i][0])
+            best_array.append(best - 0.599788)
+        best_arrays.append(best_array)
+    best_arrays = torch.tensor(best_arrays)
+    med = torch.quantile(best_arrays, q=0.5, dim=0)
+    low = med - torch.quantile(best_arrays, q=0.25, dim=0, keepdim=True)
+    up = torch.quantile(best_arrays, q=0.75, dim=0, keepdim=True) - med
+    axes.errorbar(range(number_outer_loops_with_seeds),
+                  med,
+                  yerr=torch.cat((low, up), dim=0),
+                  linewidth=3,
+                  elinewidth=1,
+                  capsize=3,
+                  )
+    axes.set_yscale('log')
+    axes.grid()
+    axes.set_title('Utility gap')
+    axes.set_xlim([0, number_outer_loops_with_seeds])
+    axes.set_xlabel('iterations')
+    # plt.show()
+
+
 if __name__ == '__main__':
-    train_x = torch.tensor(
-        [[0.5718, 0.2027],
-         [0.1001, 0.4709],
-         [0.0046, 0.3743],
-         [0.9466, 0.0061],
-         [0.8808, 0.9170]], dtype=torch.float64)
-    number_inner_loops = 200
-    trace = optimize_gramacy_toy(train_x, eta=0.1, number_of_inner_loops=number_inner_loops)
-    # plot_firstly(train_x)
-    print_dual_values(train_x=trace['seed_points'],
-                      bounds_x=torch.tensor([[0.0, 0.0], [1., 1.]]),
-                      bounds_lmbds=torch.tensor([[0.0, 0.0], [2., 2]]),
-                      n=15,
-                      lambdas_trace=torch.tensor(trace['lagrange_mults_inner'][0]))
+    with open("my_results_exp_rho2_eta0.5_new_cool.json", "r") as file:
+        data = json.load(file)
+    number_of_experiment_to_plot = 0
+    number_of_outer_iteration_to_plot = 30
+    trace = data[number_of_experiment_to_plot]
+    train_x = torch.tensor(trace['seed_points'], dtype=torch.double)
+    train_x = torch.cat((train_x, torch.tensor(trace['x'][0:number_of_outer_iteration_to_plot])[:, 0, :]))
+    plot_firstly(train_x, joint_function)
+    # print_dual_values(train_x=train_x,
+    #                   bounds_x=torch.tensor([[0.0, 0.0], [1., 1.]]),
+    #                   bounds_lmbds=torch.tensor([[0.0, 0.0], [1., 1.]]),
+    #                   n=18,
+    #                   lambdas_trace=torch.tensor(trace["lagrange_mults_inner"][number_of_outer_iteration_to_plot]),
+    #                   penalty_rate=2.,
+    #                   name_objective="exp")
+    # number_inner_loops = 60
     # for i in tqdm(range(number_inner_loops)):
     #     if i % 1 == 0:
-    #         print_albo_objective_values_for_lambda(train_x,
-    #                                                torch.tensor([[0.0, 0.0], [1.0, 1.0]]),
-    #                                                torch.tensor(trace['lagrange_mults_inner'][0][i]),
+    #         print_albo_objective_values_for_lambda(train_x=train_x,
+    #                                                bounds=torch.tensor([[0.0, 0.0], [1.0, 1.0]]),
+    #                                                lmbds=torch.tensor(
+    #                                                    trace['lagrange_mults_inner'][number_of_outer_iteration_to_plot][
+    #                                                        i]),
     #                                                n=30,
-    #                                                x_candidate=trace['x_inner'][0][i],
+    #                                                x_candidate=torch.tensor(
+    #                                                    trace['x_inner'][number_of_outer_iteration_to_plot][i]),
     #                                                show=False,
     #                                                save=True,
-    #                                                path='/Users/Dasha/desktop/experiment_plots_eta0.1/iter{0}'.format(i))
-
-    # print_albo_objective_values_for_lambda(train_x, torch.tensor([[1.283627560956143], [0.0]]), 50)
+    #                                                path='/Users/Dasha/desktop/experiment_plots_eta0.5/iter{0}'.format(
+    #                                                    i),
+    #                                                penalty_rate=2.,
+    #                                                name_objective="exp"
+    #                                                )
+    # fh = plt.figure(figsize=[6, 6])
+    # axes = fh.subplots()
+    # learning_curve(axes, "my_results_debag.json")
+    #
+    # plt.show()
