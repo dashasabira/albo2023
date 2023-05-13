@@ -1,6 +1,9 @@
 from albo.acquisition import OptimizationViaALBO
+from albo.acquisition import OptimizationViaCMCO
 import torch
 import numpy as np
+import json
+from tqdm import tqdm
 
 
 def joint_function(x):
@@ -14,32 +17,101 @@ def joint_function(x):
 
 
 def optimize_gramacy_toy(train_x=None,
+                         values=None,
                          bounds=torch.tensor([[0.0, 0.0], [1.0, 1.0]], dtype=torch.double),
-                         number_of_inner_loops=50,
-                         number_of_outer_loops=1,
-                         penalty_rate=1,
+                         penalty_rate=5.,
+                         eta=1.,
+                         number_of_outer_loops=30,
+                         number_of_inner_loops=60,
                          print_trace=False,
-                         eta=None
+                         mix=True,
+                         exploitation=False,
+                         mc_samples=1024,
+                         raw_samples=100,
+                         number_restarts=6,
+                         seed=100,
+                         seed_points=5,
+                         noise_level=1e-4,
+                         name_objective="classic",
+                         case="albo"
                          ):
-    opt = OptimizationViaALBO(joint_function=joint_function,
-                              bounds=bounds,
-                              train_x=train_x,
-                              number_of_inner_loops=number_of_inner_loops,
-                              number_of_outer_loops=number_of_outer_loops,
-                              penalty_rate=penalty_rate,
-                              eta=eta,
-                              print_trace=print_trace)
+    if case == "albo":
+        opt = OptimizationViaALBO(joint_function=joint_function,
+                                  bounds=bounds,
+                                  train_x=train_x,
+                                  values=values,
+                                  number_of_inner_loops=number_of_inner_loops,
+                                  number_of_outer_loops=number_of_outer_loops,
+                                  penalty_rate=penalty_rate,
+                                  eta=eta,
+                                  print_trace=print_trace,
+                                  mix=mix,
+                                  exploitation=exploitation,
+                                  mc_samples=mc_samples,
+                                  raw_samples=raw_samples,
+                                  number_restarts=number_restarts,
+                                  seed=seed,
+                                  seed_points=seed_points,
+                                  noise_level=noise_level,
+                                  name_objective=name_objective)
+    if case == "cmco":
+        opt = OptimizationViaCMCO(joint_function=joint_function,
+                                  bounds=bounds,
+                                  train_x=train_x,
+                                  values=values,
+                                  number_of_inner_loops=number_of_inner_loops,
+                                  number_of_outer_loops=number_of_outer_loops,
+                                  print_trace=print_trace,
+                                  mix=mix,
+                                  exploitation=exploitation,
+                                  mc_samples=mc_samples,
+                                  raw_samples=raw_samples,
+                                  number_restarts=number_restarts,
+                                  seed=seed,
+                                  seed_points=seed_points,
+                                  noise_level=noise_level)
     trace = opt.optimize()
     return trace
 
 
 if __name__ == '__main__':
-    train_x = torch.tensor(
-        [[0.5718, 0.2027],
-        [0.1001, 0.4709],
-        [0.0046, 0.3743],
-        [0.9466, 0.0061],
-        [0.8808, 0.9170]], dtype=torch.float64)
-    trace = optimize_gramacy_toy(train_x)
-    for i in range(len(trace['x_inner'][0])):
-        print(trace['x_inner'][0][i], '---', trace['lagrange_mults_inner'][0][i], '\n')
+    results = []
+    with open("my_results_albo_classic_rho1.json", "r") as file:
+        data = json.load(file)
+    for i in tqdm(range(0,1)):
+        results.append(
+            optimize_gramacy_toy(
+                train_x=torch.tensor(data[i]['seed_points'], dtype=torch.double),
+                case="albo",
+                mix=True,
+                exploitation=False,
+                name_objective="exp",
+                penalty_rate=2,
+                eta=0.5,
+                number_of_outer_loops=30,
+                number_of_inner_loops=60
+            )
+        )
+    with open("my_results_exp_rho2_eta0.5_new_cool.json", "w") as json_file:
+        json.dump(results, json_file)
+
+
+    # results = []
+    # with open("my_results_albo_classic_rho1.json", "r") as file:
+    #     data = json.load(file)
+    # for i in tqdm(range(20)):
+    #     results.append(
+    #         optimize_gramacy_toy(
+    #             train_x=torch.tensor(data[i]['seed_points'], dtype=torch.double),
+    #             case="albo",
+    #             mix=False,
+    #             exploitation=True,
+    #             name_objective="exp",
+    #             penalty_rate=1,
+    #             eta=0.2,
+    #             number_of_outer_loops=30,
+    #             number_of_inner_loops=60
+    #         )
+    #     )
+    # with open("my_results_debag_expl.json", "w") as json_file:
+    #     json.dump(results, json_file)

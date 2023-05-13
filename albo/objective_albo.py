@@ -1,3 +1,4 @@
+from abc import abstractmethod
 from typing import List, Callable, Optional
 
 import torch
@@ -6,7 +7,7 @@ from botorch.acquisition.objective import MCAcquisitionObjective
 
 
 class AlboMCObjective(MCAcquisitionObjective):
-    _default_mult = 0.
+    _default_mult = 0.001
 
     def __init__(
             self,
@@ -45,12 +46,31 @@ class AlboMCObjective(MCAcquisitionObjective):
             penalty += self.penalty(constraint(samples), self.lagrange_mults[i])
         return obj - penalty
 
-    def penalty(self, t: Tensor, lagrange_mult: float):
+    def update_mults(self, samples: Tensor):
+        """
+            samples: 'sample_shape x batch_shape=1 x q=1 x m'
+        """
+        for i, constraint in enumerate(self.constraints):
+            y = self.lagrange_mults[i]
+            t = constraint(samples)
+            y_new = y + self.eta * self.grad_penalty(t, y)
+            self.lagrange_mults[i] = max(0, y_new.item())
+
+    @abstractmethod
+    def penalty(self, t: Tensor, y: float) -> Tensor:
+        pass
+
+    @abstractmethod
+    def grad_penalty(self, t: Tensor, m: float):
+        pass
+
+
+class ClassicAlboMCObjective(AlboMCObjective):
+    def penalty(self, t: Tensor, y: float):
         """
             t: 'sample_size x batch_size x q'
             ouput: 'sample_size x batch_size x q'
         """
-        y = lagrange_mult
         r = self.penalty_rate
 
         return torch.where(
@@ -59,14 +79,34 @@ class AlboMCObjective(MCAcquisitionObjective):
             y * t + (r / 2.0) * t ** 2
         )
 
+    def grad_penalty(self, t, y):
+        r = self.penalty_rate
+        z = y + r * t
+
+        return torch.where(z < 0, -y / r, t).mean()
+
+
+class ExpAlboMCObjective(AlboMCObjective):
+    def penalty(self, t: Tensor, y: float):
+        """
+            t: 'sample_size x batch_size x q'
+            ouput: 'sample_size x batch_size x q'
+        """
+        r = self.penalty_rate
+
+        return (y / r) * (torch.exp(r * t) - 1.0)
+
     def update_mults(self, samples: Tensor):
         """
             samples: 'sample_shape x batch_shape=1 x q=1 x m'
         """
         for i, constraint in enumerate(self.constraints):
             y = self.lagrange_mults[i]
-            r = self.penalty_rate
-            c = constraint(samples)
-            z = y + r * c
-            y_new = y + self.eta * torch.where(z < 0, -y / r, c).mean()
-            self.lagrange_mults[i] = y_new.item()
+            t = constraint(samples)
+            y_new = y * (1 + self.eta * self.grad_penalty(t, y))
+            self.lagrange_mults[i] = max(y / 10, min(y * 10, y_new))
+
+    def grad_penalty(self, t, y):
+        r = self.penalty_rate
+
+        return ((1 / r) * (torch.exp(r * t) - 1.0)).mean()
