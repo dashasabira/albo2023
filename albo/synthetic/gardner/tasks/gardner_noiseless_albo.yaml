@@ -1,0 +1,10 @@
+task_id: gardner_albo_noiseless_01_as
+runner: albo-noiseless
+dumps_dir: $ALBO_DUMPS_DIR/dumps
+
+
+
+blackbox: albo/synthetic/gardner.py
+bounds: [[0.0, 0.0], [6.0, 6.0]]
+
+
